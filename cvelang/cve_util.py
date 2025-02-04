@@ -1,32 +1,46 @@
-import os
 import json
+import logging
+import os
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 
-from sentence_transformers import SentenceTransformer
 import psycopg2
+from psycopg2.extensions import cursor, connection
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from cvelang import reference_util, code_util
 
-data_dir = Path(os.getenv('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
-cve_dir = data_dir / 'cvelistV5'
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def git_clone_cve_data():
+DATA_DIR = Path(os.getenv('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
+CVE_DIR = DATA_DIR / 'cvelistV5'
+
+DB_CONFIG = {
+    "dbname": "cvelang",
+    "user": "postgres",
+    "password": "postgres",
+    "host": "localhost"
+}
+
+def git_clone_cve_data(data_dir):
     if not data_dir.exists():
         data_dir.mkdir(parents=True, exist_ok=True)
         os.chdir(data_dir)
         os.system('git clone https://github.com/CVEProject/cvelistV5')
 
-def cve_filepath_iter():
-    for path in cve_dir.glob('cves/[0-9][0-9][0-9][0-9]/**/*.json'):
+def cve_filepath_iter(directory):
+    for path in directory.glob('cves/[0-9][0-9][0-9][0-9]/**/*.json'):
         yield path
 
 def read_file(path):
     with open(path, 'r') as f:
         return f.read()
 
-def cve_json_iter():
-    for path in cve_filepath_iter():
+def cve_json_iter(cve_dir):
+    for path in cve_filepath_iter(cve_dir):
         yield json.loads(read_file(path))
 
 def init_model():
@@ -41,184 +55,251 @@ def setup_db():
         host="localhost"
     )
     cur = conn.cursor()
-    
-    # Enable vector extension
-    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    
-    # Create table for CVEs
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS cves (
-            id SERIAL PRIMARY KEY,
-            cve_id TEXT UNIQUE NOT NULL,
-            description TEXT,
-            description_embedding vector(384),  -- dimension matches MiniLM model
-            date_published TIMESTAMP,
-            date_updated TIMESTAMP,
-            state TEXT,
-            vendor TEXT,
-            product TEXT,
-            data_type TEXT,
-            data_version TEXT,
-            
-            -- ADP fields
-            cwe_id TEXT,
-            cwe_description TEXT,
-            cvss_version TEXT,
-            cvss_vector_string TEXT,
-            cvss_base_score FLOAT,
-            cvss_base_severity TEXT,
-            cvss_attack_vector TEXT,
-            cvss_attack_complexity TEXT,
-            cvss_privileges_required TEXT,
-            cvss_user_interaction TEXT,
-            cvss_scope TEXT,
-            cvss_confidentiality_impact TEXT,
-            cvss_integrity_impact TEXT,
-            cvss_availability_impact TEXT,
-            
-            -- SSVC metrics
-            ssvc_exploitation TEXT,
-            ssvc_automatable TEXT,
-            ssvc_technical_impact TEXT,
-            ssvc_version TEXT,
-            
-            -- CPE data
-            cpe_list TEXT[],
-            affected_versions TEXT[]
-        )
-    """)
-    
-    # Create indices for common filters
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_cve_id ON cves(cve_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_date_published ON cves(date_published)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_vendor ON cves(vendor)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_product ON cves(product)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_cwe_id ON cves(cwe_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_cvss_base_score ON cves(cvss_base_score)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_cvss_base_severity ON cves(cvss_base_severity)")
-    
-    # Create vector similarity index
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_embedding ON cves USING ivfflat (description_embedding vector_cosine_ops)")
-    
-    # Create code snippets table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS code_snippets (
-            id SERIAL PRIMARY KEY,
-            cve_id TEXT NOT NULL,
-            repo_url TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            code_content TEXT,
-            code_embedding vector(384),
-            language TEXT,
-            start_line INTEGER,
-            end_line INTEGER,
-            last_fetched TIMESTAMP,
-            FOREIGN KEY (cve_id) REFERENCES cves(cve_id)
-        )
-    """)
-    
-    # Create indices for code snippets
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_code_cve_id ON code_snippets(cve_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_code_repo ON code_snippets(repo_url)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_code_embedding ON code_snippets USING ivfflat (code_embedding vector_cosine_ops)")
-    
-    # Create references table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS cve_references (
-            id SERIAL PRIMARY KEY,
-            cve_id TEXT NOT NULL,
-            url TEXT NOT NULL,
-            tags TEXT[],
-            content TEXT,
-            content_embedding vector(384),
-            last_fetched TIMESTAMP,
-            FOREIGN KEY (cve_id) REFERENCES cves(cve_id)
-        )
-    """)
-    
-    # Create indices for references
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_ref_cve_id ON cve_references(cve_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_ref_url ON cve_references(url)")
-    
+    # Execute schema.sql
+    schema_path = Path(__file__).parent / 'sql' / 'schema.sql'
+    with open(schema_path) as f:
+        cur.execute(f.read())
     conn.commit()
     cur.close()
     conn.close()
 
-def safe_get(data, *keys, default=None):
-    if keys:
-        key = keys[0]
-        try:
-            data = safe_get(data[key], *keys[1:], default=default)
-        except (KeyError, IndexError, TypeError) as e:
-            return default
-    return data
+def parse_datetime(dt_str: str) -> datetime:
+    """Parse an ISO format datetime string.
+    
+    Args:
+        dt_str: ISO format datetime string
+        
+    Returns:
+        datetime object
+    """
+    return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
 
-def insert_cve(model, cve_data):
-    """Insert a single CVE record with embeddings"""
-    conn = psycopg2.connect(
-        dbname="cvelang",
-        user="postgres",
-        password="postgres", 
-        host="localhost"
+def extract_english_description(descriptions: List[Dict[str, str]]) -> str:
+    """Extract the first English description from a list of descriptions.
+    
+    Args:
+        descriptions: List of description objects with 'lang' and 'value' keys
+        
+    Returns:
+        The first English description or the first description if no English found
+    """
+    return next(
+        (d['value'] for d in descriptions if d['lang'].startswith('en')),
+        descriptions[0]['value']
     )
-    cur = conn.cursor()
+
+def extract_cvss_metrics(cve_data: Dict[str, Any]) -> Tuple[Optional[str], Optional[float], Optional[str], Optional[str], Optional[float]]:
+    """Extract CVSS metrics from CVE data.
     
-    # Extract description
-    description = safe_get(cve_data, 'containers', 'cna', 'descriptions', 0, 'value', default='')
-    if not description:
-        print(f"No description found for {safe_get(cve_data, 'cveMetadata', 'cveId', default='')}")
+    Args:
+        cve_data: CVE record data
+        
+    Returns:
+        Tuple of (v3_vector, v3_score, v3_severity, v2_vector, v2_score)
+    """
+    metrics = []
+    if 'metrics' in cve_data['containers'].get('cna', {}):
+        metrics = cve_data['containers']['cna']['metrics']
+    elif 'metrics' in cve_data['containers'].get('adp', [{}])[0]:
+        metrics = cve_data['containers']['adp'][0]['metrics']
+
+    v3_vector = v3_score = v3_severity = v2_vector = v2_score = None
+
+    for metric in metrics:
+        if 'cvssV3_1' in metric:
+            cvss_data = metric['cvssV3_1']
+            v3_vector = cvss_data.get('vectorString')
+            v3_score = cvss_data.get('baseScore')
+            v3_severity = cvss_data.get('baseSeverity')
+        elif 'cvssV2_0' in metric:
+            cvss_data = metric['cvssV2_0']
+            v2_vector = cvss_data.get('vectorString')
+            v2_score = cvss_data.get('baseScore')
+
+    return v3_vector, v3_score, v3_severity, v2_vector, v2_score
+
+def insert_cve_record(cur: cursor, cve_data: Dict[str, Any], model: SentenceTransformer) -> str:
+    """Insert or update main CVE record.
     
-    # Generate embedding
-    embedding = model.encode(description)
+    Args:
+        cur: Database cursor
+        cve_data: CVE record data
+        model: SentenceTransformer model for generating description embeddings
+        
+    Returns:
+        cve_id of inserted/updated record
+        
+    Raises:
+        psycopg2.Error: If database operation fails
+    """
+    cve_id = cve_data['cveMetadata']['cveId']
+    published = parse_datetime(cve_data['cveMetadata']['datePublished'])
+    last_modified = parse_datetime(cve_data['cveMetadata']['dateUpdated'])
+    description = extract_english_description(cve_data['containers']['cna']['descriptions'])
+    description_vector = model.encode(description, show_progress_bar=False).tolist()  # Generate embedding
+    title = cve_data['containers']['cna'].get('title')
+    status = cve_data['cveMetadata']['state']
     
-    # Extract other fields
-    cve_id = safe_get(cve_data, 'cveMetadata', 'cveId', default='')
-    date_published = safe_get(cve_data, 'cveMetadata', 'datePublished', default='1970-01-01T00:00:00Z')
-    date_updated = safe_get(cve_data, 'cveMetadata', 'dateUpdated', default='1970-01-01T00:00:00Z')
-    state = safe_get(cve_data, 'cveMetadata', 'state', default='')
-    
-    # Extract vendor/product (handling possible missing data)
-    affected = safe_get(cve_data, 'containers', 'cna', 'affected', 0, default={})
-    vendor = safe_get(affected, 'vendor', default='unknown')
-    product = safe_get(affected, 'product', default='unknown')
-    
-    data_type = safe_get(cve_data, 'dataType', default='')
-    data_version = safe_get(cve_data, 'dataVersion', default='')
-    
-    # Extract references
-    references = safe_get(cve_data, 'containers', 'cna', 'references', default=[])
-    
-    if references:
-        # Insert references
-        cur.execute("""
-            INSERT INTO cve_references (cve_id, url, tags)
-            VALUES %s
-            ON CONFLICT (cve_id, url) DO NOTHING
-        """, [
-            (cve_id, ref.get('url', ''), ref.get('tags', []))
-            for ref in references
-        ])
-    
+    cvss_data = extract_cvss_metrics(cve_data)
+
     cur.execute("""
-        INSERT INTO cves (
-            cve_id, description, description_embedding, 
-            date_published, date_updated, state,
-            vendor, product, data_type, data_version
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO cve_records (
+            cve_id, published_date, last_modified_date, title, 
+            description, description_vector, status, cvss_v3_vector, cvss_v3_base_score,
+            cvss_v3_base_severity, cvss_v2_vector, cvss_v2_base_score
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (cve_id) DO UPDATE SET
+            last_modified_date = EXCLUDED.last_modified_date,
+            title = EXCLUDED.title,
             description = EXCLUDED.description,
-            description_embedding = EXCLUDED.description_embedding,
-            date_updated = EXCLUDED.date_updated,
-            state = EXCLUDED.state
-    """, (
-        cve_id, description, embedding.tolist(),
-        date_published, date_updated, state,
-        vendor, product, data_type, data_version
-    ))
+            description_vector = EXCLUDED.description_vector,
+            status = EXCLUDED.status,
+            cvss_v3_vector = EXCLUDED.cvss_v3_vector,
+            cvss_v3_base_score = EXCLUDED.cvss_v3_base_score,
+            cvss_v3_base_severity = EXCLUDED.cvss_v3_base_severity,
+            cvss_v2_vector = EXCLUDED.cvss_v2_vector,
+            cvss_v2_base_score = EXCLUDED.cvss_v2_base_score
+    """, (cve_id, published, last_modified, title, description, description_vector, status, *cvss_data))
+
+    return cve_id
+
+def get_all_references(cve_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Collect all references from CNA and ADP containers.
     
-    conn.commit()
-    cur.close()
-    conn.close()
+    Args:
+        cve_data: CVE record data
+        
+    Returns:
+        List of reference objects
+    """
+    references = []
+    
+    if 'references' in cve_data['containers']['cna']:
+        references.extend(cve_data['containers']['cna']['references'])
+    
+    for adp in cve_data['containers'].get('adp', []):
+        if 'references' in adp:
+            references.extend(adp['references'])
+            
+    return references
+
+def insert_references(cur: cursor, cve_id: str, references: List[Dict[str, Any]]):
+    """Insert references for a CVE record.
+    
+    Args:
+        cur: Database cursor
+        cve_id: CVE identifier
+        references: List of reference objects
+        
+    Raises:
+        psycopg2.Error: If database operation fails
+    """
+    cur.execute("DELETE FROM cve_references WHERE cve_id = %s", (cve_id,))
+    
+    for ref in references:
+        cur.execute("""
+            INSERT INTO cve_references (cve_id, url, source, tags)
+            VALUES (%s, %s, %s, %s)
+        """, (
+            cve_id,
+            ref['url'],
+            ref.get('source'),
+            ref.get('tags', [])
+        ))
+
+def get_all_affected_products(cve_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Collect all affected products from CNA and ADP containers.
+    
+    Args:
+        cve_data: CVE record data
+        
+    Returns:
+        List of affected product objects
+    """
+    products = []
+    
+    if 'affected' in cve_data['containers']['cna']:
+        products.extend(cve_data['containers']['cna']['affected'])
+    
+    for adp in cve_data['containers'].get('adp', []):
+        if 'affected' in adp:
+            products.extend(adp['affected'])
+            
+    return products
+
+def insert_affected_products(cur: cursor, cve_id: str, products: List[Dict[str, Any]]):
+    """Insert affected products for a CVE record.
+    
+    Args:
+        cur: Database cursor
+        cve_id: CVE identifier
+        products: List of affected product objects
+        
+    Raises:
+        psycopg2.Error: If database operation fails
+    """
+    cur.execute("DELETE FROM cve_affected_products WHERE cve_id = %s", (cve_id,))
+    
+    for product in products:
+        for version_info in product.get('versions', [{'version': product.get('version', '*')}]):
+            cur.execute("""
+                INSERT INTO cve_affected_products (
+                    cve_id, product, vendor, version, 
+                    package_name, ecosystem
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                cve_id,
+                product.get('product', 'n/a'),
+                product.get('vendor', 'n/a'),
+                version_info.get('version', '*'),
+                product.get('packageName'),
+                product.get('ecosystem')
+            ))
+
+def insert_cve(conn: connection, cur: cursor, cve_data: Dict[str, Any], model: SentenceTransformer) -> bool:
+    """Insert a CVE record into the database.
+    
+    Args:
+        conn: Database connection
+        cur: Database cursor
+        cve_data: CVE record data
+        model: SentenceTransformer model for generating embeddings
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        cve_id = insert_cve_record(cur, cve_data, model)
+        
+        references = get_all_references(cve_data)
+        insert_references(cur, cve_id, references)
+        
+        products = get_all_affected_products(cve_data)
+        insert_affected_products(cur, cve_id, products)
+        
+        conn.commit()
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to insert CVE {cve_data['cveMetadata']['cveId']}: {e}")
+        conn.rollback()
+        return False
+
+def seed_db(conn, model, cve_dir):
+    """Seed the database with CVE data."""
+    cur = conn.cursor()
+    try:
+        for cve in tqdm(
+            cve_json_iter(cve_dir), 
+            total=278908, 
+            desc="Processing CVEs", 
+            position=0,
+            leave=True
+        ):
+            insert_cve(conn, cur, cve, model)
+    finally:
+        cur.close()
+        conn.close()
 
 def semantic_search(model, query_text, limit=10):
     """Search CVEs by semantic similarity to query text"""
@@ -233,12 +314,12 @@ def semantic_search(model, query_text, limit=10):
     # Generate embedding for query
     query_embedding = model.encode(query_text)
     
-    # Search using vector similarity - note the vector type cast
+    # Search using vector similarity
     cur.execute("""
-        SELECT cve_id, description, date_published, vendor, product,
-               1 - (description_embedding <-> %s::vector) as similarity
-        FROM cves
-        ORDER BY description_embedding <-> %s::vector
+        SELECT cve_id, description, published_date, 
+               1 - (description_vector <-> %s::vector) as similarity
+        FROM cve_records
+        ORDER BY description_vector <-> %s::vector
         LIMIT %s
     """, (query_embedding.tolist(), query_embedding.tolist(), limit))
     
@@ -247,73 +328,15 @@ def semantic_search(model, query_text, limit=10):
     conn.close()
     return results
 
-def populate_db():
-    setup_db()
-    model = init_model()
-    for cve in tqdm(cve_json_iter(), total=278908):
-        insert_cve(model, cve)
-
 def example_search(model):
     results = semantic_search(model, """
     XSS vulnerabilities in PHP web applications
     """)
     for r in results:
-        print(f"CVE: {r[0]}, Similarity: {r[5]:.3f}")
+        print(f"CVE: {r[0]}, Similarity: {r[3]:.3f}")  # Fixed index from 5 to 3
         print(f"Description: {r[1]}")
         print()
 
-def get_cve_with_references(cve_id, model=None):
-    """Get CVE details along with its references and code snippets"""
-    
-    conn = psycopg2.connect(
-        dbname="cvelang",
-        user="postgres",
-        password="postgres",
-        host="localhost"
-    )
-    cur = conn.cursor()
-    
-    # Get CVE details
-    cur.execute("""
-        SELECT cve_id, description, date_published, vendor, product
-        FROM cves WHERE cve_id = %s
-    """, (cve_id,))
-    
-    cve_data = cur.fetchone()
-    cur.close()
-    conn.close()
-    
-    if not cve_data:
-        return None
-        
-    # If model provided, update unfetched content
-    if model:
-        reference_util.update_reference_content(model, cve_id)
-        code_util.fetch_and_process_code(model, cve_id, cve_data[1])
-    
-    # Get references and code snippets
-    references = reference_util.get_references_with_content(cve_id)
-    code_snippets = code_util.get_code_snippets(cve_id)
-    
-    return {
-        'cve_id': cve_data[0],
-        'description': cve_data[1],
-        'date_published': cve_data[2],
-        'vendor': cve_data[3],
-        'product': cve_data[4],
-        'references': [
-            {
-                'url': ref[0],
-                'tags': ref[1],
-                'content': ref[2],
-                'fetched_at': ref[3]
-            }
-            for ref in references
-        ],
-        'code_snippets': code_snippets
-    }
-
 if __name__ == "__main__":
     model = init_model()
-    populate_db()
     example_search(model)

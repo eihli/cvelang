@@ -8,7 +8,7 @@ CREATE TABLE cve_records (
     last_modified_date TIMESTAMP NOT NULL,
     title TEXT,
     description TEXT NOT NULL,
-    description_vector vector(1536), -- For semantic similarity search
+    description_vector vector(384), -- For semantic similarity search
     status TEXT NOT NULL,
     cvss_v3_vector TEXT,
     cvss_v3_base_score NUMERIC(3,1),

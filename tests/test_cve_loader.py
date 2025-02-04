@@ -2,13 +2,12 @@ import json
 import pytest
 from datetime import datetime
 from psycopg2.extensions import cursor, connection
-from cvelang.cve_loader import (
+from cvelang.cve_util import (
     parse_datetime,
     extract_english_description,
     extract_cvss_metrics,
     get_all_references,
     get_all_affected_products,
-    load_json_file
 )
 
 # Sample test data
@@ -156,26 +155,6 @@ def test_get_all_affected_products():
     assert products[1]['product'] == "test_product2"
     assert products[1]['versions'][0]['version'] == "2.0"
 
-def test_load_json_file(tmp_path):
-    """Test loading JSON file."""
-    # Create a temporary JSON file
-    json_file = tmp_path / "test.json"
-    json_file.write_text('{"test": "data"}')
-    
-    result = load_json_file(str(json_file))
-    assert result == {"test": "data"}
-    
-    # Test with non-existent file
-    with pytest.raises(FileNotFoundError):
-        load_json_file("nonexistent.json")
-    
-    # Test with invalid JSON
-    invalid_json = tmp_path / "invalid.json"
-    invalid_json.write_text('{invalid json}')
-    
-    with pytest.raises(json.JSONDecodeError):
-        load_json_file(str(invalid_json))
-
 @pytest.fixture
 def mock_db():
     """Mock database connection and cursor for testing."""
@@ -204,11 +183,13 @@ def mock_db():
 def test_database_operations(mock_db):
     """Test database operations using mock connection/cursor."""
     from cvelang.cve_loader import insert_cve_record, insert_references, insert_affected_products
+    from sentence_transformers import SentenceTransformer
     
     conn, cur = mock_db
+    model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
     
     # Test insert_cve_record
-    cve_id = insert_cve_record(cur, SAMPLE_CVE_DATA)
+    cve_id = insert_cve_record(cur, model, SAMPLE_CVE_DATA)
     assert cve_id == "CVE-2024-31804"
     assert len(cur.executed) == 1
     assert "INSERT INTO cve_records" in cur.executed[0]
@@ -216,13 +197,15 @@ def test_database_operations(mock_db):
     # Test insert_references
     references = get_all_references(SAMPLE_CVE_DATA)
     insert_references(cur, cve_id, references)
-    assert len(cur.executed) == 3  # DELETE + 2 INSERTs
+    assert len(cur.executed) == 4  # DELETE + 2 INSERTs
     assert "DELETE FROM cve_references" in cur.executed[1]
     assert "INSERT INTO cve_references" in cur.executed[2]
+    assert "INSERT INTO cve_references" in cur.executed[3]
     
     # Test insert_affected_products
     products = get_all_affected_products(SAMPLE_CVE_DATA)
     insert_affected_products(cur, cve_id, products)
-    assert len(cur.executed) > 3
-    assert "DELETE FROM cve_affected_products" in cur.executed[3]
-    assert "INSERT INTO cve_affected_products" in cur.executed[4] 
+    assert len(cur.executed) == 7  # Previous 4 + DELETE + 2 INSERTs
+    assert "DELETE FROM cve_affected_products" in cur.executed[4]
+    assert "INSERT INTO cve_affected_products" in cur.executed[5]
+    assert "INSERT INTO cve_affected_products" in cur.executed[6]
