@@ -13,7 +13,7 @@ def test_semantic_search(model):
     assert all(0 <= r[5] <= 1 for r in results)  # Scores should be normalized
 
 def test_get_cve_with_references():
-    cve_id = "CVE-2021-44228"  # Log4j as an example
+    cve_id = "CVE-2024-55637"  # Arbitrary Drupal example
     result = cve_util.get_cve_with_references(cve_id)
     assert result is not None
     assert result['cve_id'] == cve_id
