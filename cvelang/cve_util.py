@@ -6,7 +6,7 @@ from sentence_transformers import SentenceTransformer
 import psycopg2
 from tqdm import tqdm
 
-from cvelang import reference_util
+from cvelang import reference_util, code_util
 
 data_dir = Path(os.getenv('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
 cve_dir = data_dir / 'cvelistV5'
@@ -99,6 +99,28 @@ def setup_db():
     
     # Create vector similarity index
     cur.execute("CREATE INDEX IF NOT EXISTS idx_embedding ON cves USING ivfflat (description_embedding vector_cosine_ops)")
+    
+    # Create code snippets table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS code_snippets (
+            id SERIAL PRIMARY KEY,
+            cve_id TEXT NOT NULL,
+            repo_url TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            code_content TEXT,
+            code_embedding vector(384),
+            language TEXT,
+            start_line INTEGER,
+            end_line INTEGER,
+            last_fetched TIMESTAMP,
+            FOREIGN KEY (cve_id) REFERENCES cves(cve_id)
+        )
+    """)
+    
+    # Create indices for code snippets
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_code_cve_id ON code_snippets(cve_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_code_repo ON code_snippets(repo_url)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_code_embedding ON code_snippets USING ivfflat (code_embedding vector_cosine_ops)")
     
     # Create references table
     cur.execute("""
@@ -241,7 +263,7 @@ def example_search(model):
         print()
 
 def get_cve_with_references(cve_id, model=None):
-    """Get CVE details along with its references and their content"""
+    """Get CVE details along with its references and code snippets"""
     
     conn = psycopg2.connect(
         dbname="langcve",
@@ -264,12 +286,14 @@ def get_cve_with_references(cve_id, model=None):
     if not cve_data:
         return None
         
-    # If model provided, update any unfetched references
+    # If model provided, update unfetched content
     if model:
         reference_util.update_reference_content(model, cve_id)
+        code_util.fetch_and_process_code(model, cve_id, cve_data[1])
     
-    # Get references with content
+    # Get references and code snippets
     references = reference_util.get_references_with_content(cve_id)
+    code_snippets = code_util.get_code_snippets(cve_id)
     
     return {
         'cve_id': cve_data[0],
@@ -285,7 +309,8 @@ def get_cve_with_references(cve_id, model=None):
                 'fetched_at': ref[3]
             }
             for ref in references
-        ]
+        ],
+        'code_snippets': code_snippets
     }
 
 if __name__ == "__main__":
