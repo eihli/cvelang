@@ -11,7 +11,7 @@ cve_dir = data_dir / 'cvelistV5'
 
 def git_clone_cve_data():
     if not data_dir.exists():
-        data_dir.mkdir(parents=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
         os.chdir(data_dir)
         os.system('git clone https://github.com/CVEProject/cvelistV5')
 

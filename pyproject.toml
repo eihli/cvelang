@@ -2,16 +2,25 @@
 name = "cvelang"
 version = "0.1.0"
 description = "Something with CVEs and LLMs."
-requires-python = ">=3.8"
-dependencies = [
-    "sentence-transformers",
-    "psycopg2-binary",
-    "numpy",
+authors = [
+    { name = "Eric Ihli", email = "eihli@owoga.com" },
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[tool.poetry]
+name = "cvelang"
+version = "0.1.0"
+description = "Something with CVEs and LLMs."
+authors = [ "Eric Ihli <eihli@owoga.com>" ]
 
-[tool.hatch.metadata]
-allow-direct-references = true 
+
+
+[tool.poetry.dependencies]
+python = ">=3.9"
+sentence-transformers = "*"
+psycopg2-binary = "*"
+numpy = "*"
+jsonschema2db = "^1.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
