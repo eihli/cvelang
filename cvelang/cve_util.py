@@ -6,6 +6,8 @@ from sentence_transformers import SentenceTransformer
 import psycopg2
 from tqdm import tqdm
 
+from cvelang import reference_util
+
 data_dir = Path(os.getenv('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
 cve_dir = data_dir / 'cvelistV5'
 
@@ -98,6 +100,24 @@ def setup_db():
     # Create vector similarity index
     cur.execute("CREATE INDEX IF NOT EXISTS idx_embedding ON cves USING ivfflat (description_embedding vector_cosine_ops)")
     
+    # Create references table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cve_references (
+            id SERIAL PRIMARY KEY,
+            cve_id TEXT NOT NULL,
+            url TEXT NOT NULL,
+            tags TEXT[],
+            content TEXT,
+            content_embedding vector(384),
+            last_fetched TIMESTAMP,
+            FOREIGN KEY (cve_id) REFERENCES cves(cve_id)
+        )
+    """)
+    
+    # Create indices for references
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ref_cve_id ON cve_references(cve_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ref_url ON cve_references(url)")
+    
     conn.commit()
     cur.close()
     conn.close()
@@ -142,6 +162,20 @@ def insert_cve(model, cve_data):
     
     data_type = safe_get(cve_data, 'dataType', default='')
     data_version = safe_get(cve_data, 'dataVersion', default='')
+    
+    # Extract references
+    references = safe_get(cve_data, 'containers', 'cna', 'references', default=[])
+    
+    if references:
+        # Insert references
+        cur.execute("""
+            INSERT INTO cve_references (cve_id, url, tags)
+            VALUES %s
+            ON CONFLICT (cve_id, url) DO NOTHING
+        """, [
+            (cve_id, ref.get('url', ''), ref.get('tags', []))
+            for ref in references
+        ])
     
     cur.execute("""
         INSERT INTO cves (
@@ -205,6 +239,54 @@ def example_search(model):
         print(f"CVE: {r[0]}, Similarity: {r[5]:.3f}")
         print(f"Description: {r[1]}")
         print()
+
+def get_cve_with_references(cve_id, model=None):
+    """Get CVE details along with its references and their content"""
+    
+    conn = psycopg2.connect(
+        dbname="langcve",
+        user="postgres",
+        password="postgres",
+        host="localhost"
+    )
+    cur = conn.cursor()
+    
+    # Get CVE details
+    cur.execute("""
+        SELECT cve_id, description, date_published, vendor, product
+        FROM cves WHERE cve_id = %s
+    """, (cve_id,))
+    
+    cve_data = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    if not cve_data:
+        return None
+        
+    # If model provided, update any unfetched references
+    if model:
+        reference_util.update_reference_content(model, cve_id)
+    
+    # Get references with content
+    references = reference_util.get_references_with_content(cve_id)
+    
+    return {
+        'cve_id': cve_data[0],
+        'description': cve_data[1],
+        'date_published': cve_data[2],
+        'vendor': cve_data[3],
+        'product': cve_data[4],
+        'references': [
+            {
+                'url': ref[0],
+                'tags': ref[1],
+                'content': ref[2],
+                'fetched_at': ref[3]
+            }
+            for ref in references
+        ]
+    }
 
 if __name__ == "__main__":
     model = init_model()
