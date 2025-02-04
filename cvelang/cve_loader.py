@@ -279,7 +279,7 @@ def load_cve_from_file(conn: connection, cur: cursor, filepath: str) -> bool:
 def main():
     """Example usage of the CVE loading functions."""
     db_config = {
-        'dbname': 'langcve',
+        'dbname': 'cvelang',
         'user': 'postgres',
         'password': 'postgres',
         'host': 'localhost',

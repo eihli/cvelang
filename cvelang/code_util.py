@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def get_db_connection():
     return psycopg2.connect(
-        dbname="langcve",
+        dbname="cvelang",
         user="postgres",
         password="postgres",
         host="localhost"

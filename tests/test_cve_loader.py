@@ -1,3 +1,4 @@
+import json
 import pytest
 from datetime import datetime
 from psycopg2.extensions import cursor, connection

@@ -5,11 +5,11 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: langcve
+      POSTGRES_DB: cvelang
     ports:
       - "5432:5432"
     volumes:
-      - langcve_db_data:/var/lib/postgresql/data
+      - cvelang_db_data:/var/lib/postgresql/data
 
 volumes:
-  langcve_db_data:
+  cvelang_db_data:

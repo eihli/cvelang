@@ -35,7 +35,7 @@ def init_model():
 def setup_db():
     """Create tables and indices for storing CVE data"""
     conn = psycopg2.connect(
-        dbname="langcve",
+        dbname="cvelang",
         user="postgres", 
         password="postgres",
         host="localhost"
@@ -156,7 +156,7 @@ def safe_get(data, *keys, default=None):
 def insert_cve(model, cve_data):
     """Insert a single CVE record with embeddings"""
     conn = psycopg2.connect(
-        dbname="langcve",
+        dbname="cvelang",
         user="postgres",
         password="postgres", 
         host="localhost"
@@ -223,7 +223,7 @@ def insert_cve(model, cve_data):
 def semantic_search(model, query_text, limit=10):
     """Search CVEs by semantic similarity to query text"""
     conn = psycopg2.connect(
-        dbname="langcve",
+        dbname="cvelang",
         user="postgres",
         password="postgres",
         host="localhost"
@@ -266,7 +266,7 @@ def get_cve_with_references(cve_id, model=None):
     """Get CVE details along with its references and code snippets"""
     
     conn = psycopg2.connect(
-        dbname="langcve",
+        dbname="cvelang",
         user="postgres",
         password="postgres",
         host="localhost"
