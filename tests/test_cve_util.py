@@ -182,14 +182,14 @@ def mock_db():
 
 def test_database_operations(mock_db):
     """Test database operations using mock connection/cursor."""
-    from cvelang.cve_loader import insert_cve_record, insert_references, insert_affected_products
+    from cvelang.cve_util import insert_cve_record, insert_references, insert_affected_products
     from sentence_transformers import SentenceTransformer
     
     conn, cur = mock_db
     model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
     
     # Test insert_cve_record
-    cve_id = insert_cve_record(cur, model, SAMPLE_CVE_DATA)
+    cve_id = insert_cve_record(cur, SAMPLE_CVE_DATA, model)
     assert cve_id == "CVE-2024-31804"
     assert len(cur.executed) == 1
     assert "INSERT INTO cve_records" in cur.executed[0]

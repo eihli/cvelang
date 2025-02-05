@@ -10,7 +10,6 @@ from psycopg2.extensions import cursor, connection
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from cvelang import reference_util, code_util
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
