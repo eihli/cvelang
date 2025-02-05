@@ -1,3 +1,4 @@
 .vscode/
 .aider*
 __pycache__
+.plan
